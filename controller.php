@@ -35,6 +35,7 @@ class gglmsController extends JController {
         $this->registerTask('updateTrack', 'updateTrack');
         $this->registerTask('enablecoupon', 'enablecoupon');
         $this->registerTask('attestato', 'attestato');
+        $this->registerTask('stampa_attestati_azienda', 'stampa_attestati_azienda');
         $this->registerTask('helpdesk', 'helpdesk');
         $this->registerTask('helpdesksubmit', 'helpdesksubmit');
         $this->registerTask('openelement', 'openelement');
@@ -212,6 +213,59 @@ class gglmsController extends JController {
     public function attestato() {
         JRequest::setVar('view', 'attestato');
         parent::display();
+    }
+    
+    public function stampa_attestati_azienda(){
+        
+        $japp = & JFactory::getApplication();
+
+        $db = & JFactory::getDbo();
+
+        $model = & $this->getModel('attestato');
+        $model->_user_id=20786;
+
+        require_once('models/libs/pdf/certificatePDF.class.php');
+        
+        $pdf = new certificatePDF();
+
+            try {
+                $query = 'SELECT *
+                          FROM
+                          (SELECT c.id_utente, p.cb_nome, p.cb_cognome, p.cb_datadinascita, p.cb_luogodinascita, p.cb_provinciadinascita, p.cb_societa,
+                        
+                          (SELECT DATE_FORMAT(c_date_time,"%d/%m/%Y")FROM `ihyb8_quiz_r_student_quiz` AS q WHERE c_quiz_id= 8 AND c_student_id= c.id_utente AND c_passed=1 ORDER BY c_date_time LIMIT 1) AS datetest
+                            FROM ihyb8_gg_coupon AS c 
+                            LEFT JOIN ihyb8_comprofiler AS p ON c.id_utente= p.user_id 
+                            WHERE c.id_societa = 20786 AND c.id_utente IS NOT NULL) AS tutti
+                        
+                          WHERE tutti.datetest IS NOT NULL';
+                
+                $db->setQuery($query);
+                if (false === ($results = $db->loadAssocList()))
+                    throw new RuntimeException($db->getErrorMsg(), E_USER_ERROR);
+
+                $course_info = $model->_certificate_course_info_from_id(1);
+
+                $certificate_info = $model->_certificate_info();
+                
+                foreach ($results as $item) {
+
+                    $pdf->add_data($course_info);
+                        if (!empty($course_info['attestato']))
+                            $template = $course_info['attestato'];
+
+                        $user_info = $item;
+                        $pdf->add_data($user_info);
+
+                        $pdf->add_data($certificate_info);
+
+                        $pdf->fetch_pdf_template($template, null, true, false, 0);
+                }
+                $pdf->Output($course_info['titoloattestato'] . '.pdf', 'D');
+            } catch (Exception $e) {
+                //do something;
+            }
+        $japp->close();
     }
 
     public function switchviewmode() {

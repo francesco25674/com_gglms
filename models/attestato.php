@@ -15,7 +15,7 @@ require_once('components/com_gglms/models/libs/errors/debug.class.php');
  */
 class gglmsModelattestato extends JModel {
 
-	private $_user_id;
+	public $_user_id;
 	//    private $_user;
 	private $_quiz_id;
 	private $_item_id;
@@ -139,6 +139,8 @@ class gglmsModelattestato extends JModel {
 
 
 			$pdf->fetch_pdf_template($template, null, true, false, 0);
+
+
 			$pdf->Output($course_info['titoloattestato'] . '.pdf', 'D');
 			
 
@@ -198,6 +200,31 @@ class gglmsModelattestato extends JModel {
 		}
 	}
 
+	public function  _certificate_course_info_from_id($id){
+		try {
+			$query = 'SELECT
+					c.id,
+					c.titoloattestato,
+                    c.durata,
+                    c.attestato
+					FROM #__gg_corsi AS c
+					
+					WHERE id = '.$id.'
+					LIMIT 1';
+			
+			debug::msg($query);
+			$this->_db->setQuery($query);
+			if (false === ($results = $this->_db->loadAssoc()))
+				throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+			debug::vardump($results);
+			return $results;
+		} catch (Exception $e) {
+			debug::exception($e);
+			return array();
+		}
+
+	}
+
 	private function _certificate_user_info() {
 		try {
 			$query = 'SELECT
@@ -223,7 +250,7 @@ class gglmsModelattestato extends JModel {
 		return array();
 	}
 
-	private function _certificate_info() {
+	public function _certificate_info() {
 		try {
 			$query = 'SELECT
 					d.`name`,
@@ -233,6 +260,9 @@ class gglmsModelattestato extends JModel {
 					FROM #__usergroups_details AS d
 					INNER JOIN #__gg_coupon AS c ON c.gruppo=d.group_id
 					WHERE c.id_utente=' . $this->_user_id;
+
+
+
 			debug::msg($query);
 			$this->_db->setQuery($query);
 			if (false === ($results = $this->_db->loadAssoc()))
