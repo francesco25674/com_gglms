@@ -1,0 +1,670 @@
+<?php
+
+/**
+ * WebTVContenuto Model
+ *
+ * @package    Joomla.Components
+ * @subpackage WebTV
+ */
+defined('_JEXEC') or die('Restricted access');
+
+jimport('joomla.application.component.model');
+
+/**
+ * WebTVContenuto Model
+ *
+ * @package    Joomla.Components
+ * @subpackage WebTV
+ */
+class gglmsModelcorso extends JModel {
+
+    private $_dbg;
+    private $_japp;
+    private $_elementi;
+    private $_moduli;
+    private $_corso;
+    private $_stato_elemento;
+    private $_propedeuticita;
+    private $_iscrizione;
+    private $_anagrafica;
+    private $_fields;
+    private $_user;
+    private $_id_corso;
+    private $_type_print;
+    private $_bool;
+
+    /**
+     * Se il visitatore non è loggato viene reindirizzato alla pagina di login e,
+     * una volta effettuato l'accesso ritorna alla pagina del corso.
+     * @param type $config 
+     */
+    public function __construct($config = array()) {
+        parent::__construct($config);
+        $this->_dbg = JRequest::getBool('dbg', 0);
+        $this->_japp = & JFactory::getApplication();
+        $this->_db = & JFactory::getDbo();
+
+        $this->_id_corso = JRequest::getInt('id', 0);
+
+        debug::vardump($this->_id_corso);
+        $this->_user = & JFactory::getUser();
+        if ($this->_user->guest) {
+//TODO Personalizzare il messaggio per i non registrati
+            $msg = "Per accedere al corso è necessario loggarsi";
+            $this->_japp->redirect(JRoute::_('index.php?option=com_users&view=login&return=' . urlencode(base64_encode('index.php?option=com_gglms&view=corso&id=' . $this->_id_corso))), $msg);
+        }
+
+        $this->checkIscrizione();
+        $this->_checkCoupon();
+        $this->checkAnagrafica();
+    }
+
+    public function __destruct() {
+        
+    }
+
+    /*
+     * Verifica che l'utente sia iscritto al corso
+     * In caso negativo redirige sulla pagina COUPON
+     */
+
+    private function checkIscrizione() {
+        $user_id = $this->_user->get('id');
+
+        try {
+            $query = '
+                    SELECT
+                        *
+                    FROM
+                        #__gg_iscrizioni AS i
+                    WHERE i.id_corso = ' . $this->_id_corso . '
+                        AND
+                          i.id_utente =  ' . $user_id . '
+                    ';
+
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssoc()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $this->_iscrizione = empty($results) ? array() : $results;
+        } catch (Exception $e) {
+            jimport('joomla.error.log');
+            $log = &JLog::getInstance('com_gglms.log.php');
+            $log->addEntry(array('comment' => $e->getMessage(), 'status' => $e->getCopde));
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+            $this->_iscrizione = array();
+        }
+        if (!$this->_iscrizione) {
+//TODO Personalizzare il messaggio per i non registrati
+            $msg = "Non sei iscritto a questo corso. Se disponi di un coupon puoi riscattarlo qui sotto.";
+
+//TODO Sistemare il messaggio di mancato accesso al corso e di inserimento coupon
+            $this->_japp->redirect(JRoute::_('index.php?option=com_gglms&view=coupon'), $msg, 'error');
+        }
+    }
+
+    private function _checkCoupon() {
+        try {
+            $user_id = $this->_user->get('id');
+            $query = 'SELECT
+                    DATE_ADD(data_utilizzo,INTERVAL durata DAY) < NOW() AS scaduto
+                FROM #__gg_coupon
+                WHERE id_utente=' . $user_id . '
+                AND abilitato=1
+                AND corsi_abilitati REGEXP \'[[:<:]]' . $this->_id_corso . '[[:>:]]\'';
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssocList()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $go_corso = 0;
+            $a_morte_i_coupon_scaduti = 0;
+            foreach ($results as $row) {
+                $a_morte_i_coupon_scaduti |= $row['scaduto']; // almeno 1 a 1
+                $go_corso |=!$row['scaduto']; // almeno 1 a 0
+            }
+            if ($a_morte_i_coupon_scaduti) {
+// pulizia del DB
+                $query = 'UPDATE #__gg_coupon SET abilitato=0 WHERE DATE_ADD(data_utilizzo,INTERVAL durata DAY) < NOW()';
+                $this->_db->setQuery($query);
+                if (false === ($results = $this->_db->query()))
+                    throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            }
+
+            if (!$go_corso) {
+                $msg = "Il coupon che utilizzi è scaduto";
+//TODO Sistemare il messaggio di mancato accesso al corso e di inserimento coupon
+                $this->_japp->redirect(JRoute::_('index.php?option=com_gglms&view=coupon'), $msg, 'error');
+            }
+        } catch (Exception $e) {
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+        }
+    }
+
+    /*
+     * Verifico che l'anagrafica sia compilata per tutti i campi che 
+     * sono obbligatori
+     * sono pubblicati
+     * sono visibili sul profilo
+     * 
+     */
+
+    private function checkAnagrafica() {
+
+        $user_id = $this->_user->get('id');
+
+
+//Recupero i campi obbligatori
+        try {
+            $query = '
+                    SELECT
+                        name
+                    FROM
+                        #__comprofiler_fields AS c
+                    WHERE 
+                        registration = 1 and 
+                        published= 1 and 
+                        profile = 1 and 
+            			required=1
+                    ';
+
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssocList()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $this->_fields = $results;
+        } catch (Exception $e) {
+            debug::exception($e);
+        }
+
+//recupero di dati dell'utente collegato
+        try {
+            $query = '
+                    SELECT
+                        *
+                    FROM
+                        #__comprofiler AS c
+                    WHERE 
+                        c.user_id = ' . $user_id . '
+                    ';
+
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssoc()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $this->_anagrafica = empty($results) ? array() : $results;
+        } catch (Exception $e) {
+            jimport('joomla.error.log');
+            $log = &JLog::getInstance('com_gglms.log.php');
+            $log->addEntry(array('comment' => $e->getMessage(), 'status' => $e->getCopde));
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+            $this->_anagrafica = array();
+        }
+
+        foreach ($this->_fields as $f) {
+            if (empty($this->_anagrafica[$f['name']])) {
+
+                if ($this->_dbg)
+                    $this->_japp->enqueueMessage("Campo=>" . $f['name'], 'error');
+                if ($this->_dbg)
+                    $this->_japp->enqueueMessage("Valore=>" . $this->_anagrafica[$f['name']], 'error');
+
+//TODO Personalizzare il messaggio per i non registrati
+                $msg = "Non hai ancora compilato l'anagrafica. prima di procedere devi compilare i tuoi dati.";
+
+                $this->_japp->redirect(JRoute::_('index.php?option=com_comprofiler&task=userDetails'), $msg, 'error');
+            }
+        }
+    }
+
+    private function getPropedeuticita($e) {
+
+//TODO Modifica non testata, assicurarsi che funziona!!
+        $bool = 1;
+
+        // echo $e['tipologia'];
+        if ($e['tipologia'] == 'exam') {
+            $user_id = $this->_user->get('id');
+            // controllo se l'utente è abilitato
+            $query = 'SELECT id_quiz FROM #__gg_final_test WHERE id_utente=' . $user_id . ' AND attempt_time IS NULL LIMIT 1';
+            debug::msg($query);
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssoc()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            if (empty($results)) {
+                $bool = 0;
+            } else {
+                $bool = 1;
+                $e['path'] = $results['id_quiz'];
+            }
+        } elseif (!empty($e['propedeuticita'])) {
+            $propedeuticita = explode(",", $e['propedeuticita']);
+            $i = 0;
+            $tot = count($propedeuticita);
+            while ($i < $tot && $bool) {
+                $bool &= $this->getStatoElementi($propedeuticita[$i++]);
+            }
+        }
+
+        if ($bool) {
+            $stato = $this->getStatoElementi($e);
+
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage('###' . var_export($e, true) . '###' . $stato . '-' . $bool);
+
+            if ($stato) {
+//elemento superato
+                $e['stato'] = "components/com_gglms/img/superato.png";
+                $e['classe'] = $e['tipologia'] . "_2";
+            } else {
+//elemento abilitato ma non ancora superato
+                $e['stato'] = "components/com_gglms/img/nonsuperato.png";
+                $e['classe'] = $e['tipologia'] . "_1";
+            }
+        } else {
+//contenuto bloccato
+            $e['stato'] = "components/com_gglms/img/bloccato.png";
+            $e['classe'] = $e['tipologia'] . "_0";
+        }
+        if ($this->_dbg)
+            $this->_japp->enqueueMessage('###' . var_export($e, true) . '###');
+        return $e;
+    }
+
+    private function getStatoElementi($e) {
+        try {
+
+//TODO la verifica di stato attualmente viene effettuata in base alla tipologia di elemento.
+//Se si svilupperà anche la la parte di quiz la verifica di stato potrà avvenire solo sulla tabella track
+
+            $user = & JFactory::getUser();
+            $user_id = $user->get('id');
+
+
+            if (empty($e))
+                throw new RuntimeException('Impossibile recuperare l\'elemento ' . $e, E_USER_ERROR);
+
+
+            if (!is_array($e)) {
+                $query = 'SELECT *
+		  FROM #__gg_elementi 
+		  WHERE id=' . $e . '
+		  LIMIT 1';
+
+                debug::msg($query);
+                $this->_db->setQuery($query);
+                if (false === ($results = $this->_db->loadAssoc()))
+                    throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+                $e = empty($results) ? array() : $results;
+            }
+
+
+            switch ($e['tipologia']) {
+                case 'quiz':
+                    $query = '
+                            SELECT
+                                c_quiz_id
+                            FROM
+                                #__quiz_r_student_quiz q
+                            WHERE
+                                q.c_quiz_id = ' . $e['path'] . ' AND
+                                q.c_passed = 1 AND
+                                q.c_student_id = ' . $user_id . '
+                            ';
+                    break;
+                case 'exam':
+                    $query = '
+                            SELECT
+                                c_quiz_id
+                            FROM
+                                #__quiz_r_student_quiz q
+                            WHERE
+                                q.c_quiz_id IN (SELECT id_quiz FROM #__gg_final_test WHERE id_utente=' . $user_id . ' AND attempt_time IS NOT NULL) AND
+                                q.c_passed = 1 AND
+                                q.c_student_id = ' . $user_id . ' LIMIT 1';
+                    break;
+                case 'contenuto':
+                default :
+                    $query = '
+                            SELECT
+                                *
+                            FROM
+                                #__gg_track AS t
+                            WHERE t.id_elemento = ' . $e['id'] . '
+                                AND
+                                  t.id_utente = ' . $user_id . '
+                                AND stato = 1
+                            ';
+                    break;
+            }
+            debug::msg($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssoc()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $this->_stato_elemento = empty($results) ? array() : $results;
+        } catch (Exception $e) {
+            jimport('joomla.error.log');
+            $log = &JLog::getInstance('com_gglms.log.php');
+            $log->addEntry(array('comment' => $e->getMessage(), 'status' => $e->getCopde));
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+            $this->_stato_elemento = array();
+        }
+        debug::vardump($this->_stato_elemento);
+        return empty($this->_stato_elemento) ? 0 : 1;
+    }
+
+    /**
+     * Ritorna tutti gli elementi dell'id modulo passato
+     *
+     * @return array
+     */
+    private function getElementi($id_modulo) {
+        try {
+
+            $query = '
+                SELECT
+                    *
+                FROM
+                    #__gg_elementi AS e
+                WHERE e.id_modulo = ' . $id_modulo . '
+                ORDER BY e.ordinamento, e.id
+                ';
+                
+            debug::msg($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssocList('id')))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+
+            $this->_elementi = empty($results) ? array() : $results;
+        } catch (Exception $e) {
+            jimport('joomla.error.log');
+            $log = &JLog::getInstance('com_gglms.log.php');
+            $log->addEntry(array('comment' => $e->getMessage(), 'status' => $e->getCopde));
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+            $this->_elementi = array();
+        }
+
+        foreach ($this->_elementi as &$e) {
+            $e = &$this->getPropedeuticita($e);
+        }
+
+        if ($this->_dbg)
+            $this->_japp->enqueueMessage(var_export($e, true));
+        return $this->_elementi;
+    }
+
+    /**
+     *
+     * @return array
+     */
+    private function getModuli($id_corso) {
+        try {
+
+            $query = '
+                SELECT
+                    *
+                FROM
+                    #__gg_moduli AS m
+                WHERE m.id_corso = ' . $id_corso . '
+                ORDER BY ordinamento,id ASC';
+
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssocList('id')))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $this->_moduli = empty($results) ? array() : $results;
+        } catch (Exception $e) {
+            jimport('joomla.error.log');
+            $log = &JLog::getInstance('com_gglms.log.php');
+            $log->addEntry(array('comment' => $e->getMessage(), 'status' => $e->getCopde));
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+            $this->_moduli = array();
+        }
+        return $this->_moduli;
+    }
+
+    public function getCorso() {
+        $this->_corso = array(
+            'moduli' => array(
+                'elementi' => array()
+            ),
+        );
+
+        $corso = $this->getVersioneCorso($this->_id_corso);
+        if (empty($corso))
+            return $this->_corso;
+        $this->_corso = & $corso;
+
+        $this->_corso['print_type'] = $this->get_print_type($this->_id_corso);
+
+        $this->_corso['moduli'] = $this->getModuli($this->_corso['id']);
+
+        foreach ($this->_corso['moduli'] as $m) {
+            $this->_corso['moduli'][$m['id']]['elementi'] = $this->getElementi($m['id']);
+        }
+        return $this->_corso;
+    }
+
+    /**
+     * Ritorna un array contenente le infomrazioni sul corso presa dalla tabella
+     */
+    public function getVersioneCorso($id_corso) {
+        try {
+            if (empty($id_corso))
+                return array();
+            $query = 'SELECT
+                    v.id,
+                    c.id AS id_corso,
+                    c.id_categoria,
+                    c.corso,
+                    c.titoloattestato,
+                    c.abstract,
+                    c.pubblicato,
+                    c.riservato,
+                    c.titolo_visibile,
+                    c.path_immagine,
+                    c.crediti,
+                    c.crediti_testo,
+                    c.durata,
+                    c.codice_ecm,
+                    c.edizione_num,
+                    c.obbiettivi,
+                    c.datainizio,
+                    c.datafine,
+                    c.ordinamento,
+                    v.group_id,
+                    v.versione_default,
+                    v.versione
+                FROM #__gg_corsi_versione AS v
+                INNER JOIN #__gg_corsi AS c ON v.id_corso=c.id
+                WHERE c.pubblicato=1 AND v.pubblicato=1 AND v.id_corso=' . $id_corso;
+
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadAssocList()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            if (empty($results))
+                return array();
+
+            // carico la versione del corso in base al gruppo del coupon che l'utente sta usando
+            $query = 'SELECT gruppo FROM #__gg_coupon WHERE abilitato=1 AND id_utente=' . $this->_user->id . ' AND corsi_abilitati REGEXP \'[[:<:]]' . $id_corso . '[[:>:]]\' LIMIT 1';
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($query);
+            $this->_db->setQuery($query);
+            if (false === ($results2 = $this->_db->loadAssoc()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+
+            $user_group = $results2['gruppo'];
+            $default = null;
+            $version = null;
+            $i = 0;
+            $tot = count($results);
+            while ($i < $tot && is_null($version)) {
+                if (1 == $results[$i]['versione_default'])
+                    $default = $i;
+                if ($results[$i]['group_id'] == $user_group) {
+                    $version = $i;
+                    break;
+                }
+                $i++;
+            }
+            $version = is_null($version) ? (is_null($default) ? 0 : $default) : $version;
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage('Selezionata la versione: ' . $results[$version]['versione']);
+            return $results[$version];
+        } catch (Exception $e) {
+            jimport('joomla.error.log');
+            $log = &JLog::getInstance('com_gglms.log.php');
+            $log->addEntry(array('comment' => $e->getMessage(), 'status' => $e->getCopde));
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+        }
+        return array();
+    }
+
+    /*
+     * Funzione che restituisce la modalità di stampa dell'attestato
+     * restituisce 1 se l'utente può stamparsi l'attestato
+     * restituisce 0 se l'attesto sarà prelevato dall'azienda.
+     *
+     */
+
+    public function get_print_type() {
+
+        try {
+            $query = '
+                SELECT
+                    attestato
+                FROM
+                    #__gg_coupon
+                WHERE
+                    #__gg_coupon.id_utente =' . $this->_user->id . ' AND
+                    corsi_abilitati REGEXP \'[[:<:]]' . $this->_id_corso . '[[:>:]]\'
+                ';
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($query);
+
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadResult()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $this->_type_print = empty($results) ? 0 : $results;
+        } catch (Exception $e) {
+            jimport('joomla.error.log');
+            $log = &JLog::getInstance('com_gglms.log.php');
+            $log->addEntry(array('comment' => $e->getMessage(), 'status' => $e->getCopde));
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+            $this->_type_print = array();
+        }
+
+        return $this->_type_print;
+    }
+
+    /**
+     * Abilita tutti gli elementi del corso come se fossero stati seguiti.
+     */
+    public function open_all_element() {
+        try {
+            $id_utente = $user_id = $this->_user->get('id');
+            $version = JRequest::getInt('version', 0);
+            $query = 'SELECT
+                e.id, e.tipologia, e.path
+            FROM #__gg_elementi AS e
+            RIGHT JOIN #__gg_moduli AS m ON m.id = e.id_modulo
+            RIGHT JOIN #__gg_corsi_versione AS v ON v.id = m.id_corso
+            RIGHT JOIN #__gg_corsi AS c ON c.id = v.id_corso
+            WHERE v.id=' . $version;
+            debug::msg($query);
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadRowList()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $values = array();
+            $quiz = array();
+            foreach ($results as $r) {
+                if (isset($r[0])) {
+                    if ($r[1] == 'quiz') {
+                        $quiz[] = '(' . $r[2] . ', ' . $id_utente . ', NOW(), 1, \'' . md5(uniqid('', true)) . '\', \'' . md5(uniqid('', true)) . '\', 1)';
+                    } else {
+                        $values[] = '(' . $r[0] . ', ' . $id_utente . ', 1, NOW())';
+                    }
+                }
+            }
+            $query = 'INSERT INTO #__gg_track (id_elemento, id_utente, stato, data) VALUES ' . join(',', $values) . ' ON DUPLICATE KEY UPDATE stato=1, data=NOW()';
+            debug::msg($query);
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->query()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+
+            $query = 'INSERT INTO #__quiz_r_student_quiz (c_quiz_id, c_student_id, c_date_time, c_passed, unique_id, unique_pass_id, c_finished) VALUES ' . join(', ', $quiz);
+            debug::msg($query);
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->query()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            return 1;
+        } catch (Exception $e) {
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+        }
+        return 0;
+    }
+
+    /**
+     * Chiude tutti gli elementi come se non fossero mai stati seguiti.
+     */
+    public function close_all_element() {
+        try {
+            $id_utente = $this->_user->get('id');
+            $query = 'DELETE FROM #__gg_track WHERE id_utente=' . $id_utente;
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->query()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            $query = 'DELETE FROM #__quiz_r_student_quiz WHERE c_student_id=' . $id_utente;
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->query()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            return 1;
+        } catch (Exception $e) {
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+        }
+        return 0;
+    }
+
+    /**
+     * Ritorna vero se l'utente correntemente connesso è un account demo. 
+     */
+    public function is_trial() {
+        try {
+            $id_utente = $this->_user->get('id');
+            $query = 'SELECT trial FROM #__gg_coupon where id_utente=' . $id_utente . ' AND DATE_ADD(data_utilizzo, INTERVAL durata+1 DAY)> NOW() LIMIT 1';
+            
+            $this->_db->setQuery($query);
+            if (false === ($results = $this->_db->loadResult()))
+                throw new RuntimeException($this->_db->getErrorMsg(), E_USER_ERROR);
+            return isset($results[0]) ? $results[0] : 0;
+        } catch (Exception $e) {
+            if ($this->_dbg)
+                $this->_japp->enqueueMessage($e->getMessage(), 'error');
+        }
+    }
+
+}
