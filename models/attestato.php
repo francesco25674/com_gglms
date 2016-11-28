@@ -15,7 +15,7 @@ require_once('components/com_gglms/models/libs/errors/debug.class.php');
  */
 class gglmsModelattestato extends JModel {
 
-	public $_user_id;
+	private $_user_id;
 	//    private $_user;
 	private $_quiz_id;
 	private $_item_id;
@@ -114,15 +114,15 @@ class gglmsModelattestato extends JModel {
 		try {
 			require_once('libs/pdf/certificatePDF.class.php');
 			$pdf = new certificatePDF();
-			
+
 			if (null === ($datetest = $this->_certificate_datetest()))
 				throw new RuntimeException('L\'utente non ha superato l\'esame o lo ha fatto in data ignota', E_USER_ERROR);
 			$pdf->set_data($datetest);
 
 			$course_info = $this->_certificate_course_info();
-            $pdf->add_data($course_info);
-            if (!empty($course_info['attestato']))
-                $template = $course_info['attestato'];
+			$pdf->add_data($course_info);
+			if (!empty($course_info['attestato']))
+				$template = $course_info['attestato'];
 			$user_info = $this->_certificate_user_info();
 			$pdf->add_data($user_info);
 
@@ -134,21 +134,58 @@ class gglmsModelattestato extends JModel {
 
 			$tracklog['course'] = $this->_get_track($course_info['id']);
 			$tracklog['total'] = $this->_get_track_total($course_info['id']);
-			
-			$pdf->add_tracklog($tracklog, 'tracklog');			
+
+			$pdf->add_tracklog($tracklog, 'tracklog');
 
 
 			$pdf->fetch_pdf_template($template, null, true, false, 0);
 
 
 			$pdf->Output($course_info['titoloattestato'] . '.pdf', 'D');
-			
+
 
 			return 1;
 		} catch (Exception $e) {
 			debug::exception($e);
 		}
 		return 0;
+	}
+
+	private function _get_user_societa($quiz_finale){
+		$db = & JFactory::getDbo();
+		$query = 'SELECT *
+                          FROM
+                          (SELECT c.id_utente, p.cb_nome, p.cb_cognome, p.cb_datadinascita, p.cb_luogodinascita, p.cb_provinciadinascita, p.cb_societa,
+                        
+                          (SELECT DATE_FORMAT(c_date_time,"%d/%m/%Y")FROM `ihyb8_quiz_r_student_quiz` AS q WHERE c_quiz_id= '.$quiz_finale.' AND c_student_id= c.id_utente AND c_passed=1 ORDER BY c_date_time LIMIT 1) AS datetest
+                            FROM ihyb8_gg_coupon AS c 
+                            LEFT JOIN ihyb8_comprofiler AS p ON c.id_utente= p.user_id 
+                            WHERE c.id_societa = '.$this->_user_id.' AND c.id_utente IS NOT NULL ) AS tutti
+                        
+                          WHERE tutti.datetest IS NOT NULL';
+		$db->setQuery($query);
+		if (false === ($results = $db->loadAssocList()))
+			throw new RuntimeException($db->getErrorMsg(), E_USER_ERROR);
+		return $results;
+	}
+
+	public function _generate_pdf_all($user_id){
+		require_once('libs/pdf/certificatePDF.class.php');
+		$this->_user_id =$user_id;
+		$pdf = new certificatePDF();
+		$course_info = $this->_certificate_course_info_from_id(1);
+		$utenti = $this->_get_user_societa($course_info['id_quiz_finale']);
+		
+		$certificate_info = $this->_certificate_info();
+		foreach ($utenti as $user_info) {
+			$pdf->add_data($course_info);
+			if (!empty($course_info['attestato']))
+				$template = $course_info['attestato'];
+			$pdf->add_data($user_info);
+			$pdf->add_data($certificate_info);
+			$pdf->fetch_pdf_template($template, null, true, false, 0);
+		}
+		$pdf->Output($course_info['titoloattestato'] . '.pdf', 'D');
 	}
 
 	private function _certificate_datetest() {
@@ -200,18 +237,19 @@ class gglmsModelattestato extends JModel {
 		}
 	}
 
-	public function  _certificate_course_info_from_id($id){
+	private function  _certificate_course_info_from_id($id){
 		try {
 			$query = 'SELECT
 					c.id,
 					c.titoloattestato,
                     c.durata,
-                    c.attestato
+                    c.attestato,
+                    c.id_quiz_finale
 					FROM #__gg_corsi AS c
 					
 					WHERE id = '.$id.'
 					LIMIT 1';
-			
+
 			debug::msg($query);
 			$this->_db->setQuery($query);
 			if (false === ($results = $this->_db->loadAssoc()))
@@ -250,7 +288,7 @@ class gglmsModelattestato extends JModel {
 		return array();
 	}
 
-	public function _certificate_info() {
+	private function _certificate_info() {
 		try {
 			$query = 'SELECT
 					d.`name`,
@@ -278,9 +316,9 @@ class gglmsModelattestato extends JModel {
 
 	/**
 	 * Ritorna vero l'utente è una società
-	* @return bool
-	* @throws RuntimeException
-	*/
+	 * @return bool
+	 * @throws RuntimeException
+	 */
 	public function is_company() {
 		try {
 			$query = 'SELECT COUNT(*) FROM #__gg_coupon AS c WHERE c.id_societa=' . $this->_user_id . ' LIMIT 1';
@@ -378,9 +416,9 @@ class gglmsModelattestato extends JModel {
 	}
 
 
-		/*
-	* Recupera track dalla tabella gg_track
-	*/
+	/*
+* Recupera track dalla tabella gg_track
+*/
 
 	private function _get_track($id_corso) {
 		try {
